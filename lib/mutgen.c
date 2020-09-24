@@ -980,15 +980,14 @@ out:
 }
 
 static int MSP_WARN_UNUSED
-mutgen_initialise_sites(mutgen_t *self, bool check_kept_times)
+mutgen_initialise_sites(mutgen_t *self)
 {
     int ret = 0;
     tsk_site_table_t *sites = &self->tables->sites;
     tsk_mutation_table_t *mutations = &self->tables->mutations;
+    tsk_node_table_t *nodes = &self->tables->nodes;
     tsk_id_t site_id;
     site_t *site;
-    double time;
-    const double end_time = self->end_time;
     char *state, *metadata;
     tsk_size_t j, length, metadata_length;
 
@@ -1009,17 +1008,6 @@ mutgen_initialise_sites(mutgen_t *self, bool check_kept_times)
 
         while (j < mutations->num_rows && mutations->site[j] == site_id) {
             assert(j < mutations->num_rows);
-            time = mutations->time[j];
-            if (tsk_is_unknown_time(time)) {
-                ret = MSP_ERR_UNKNOWN_TIME_NOT_SUPPORTED;
-                goto out;
-            }
-            // check if any kept mutations are younger than
-            // the time period where new mutations can be added
-            if (check_kept_times && time < end_time) {
-                ret = MSP_ERR_MUTATION_GENERATION_OUT_OF_ORDER;
-                goto out;
-            }
             state = mutations->derived_state + mutations->derived_state_offset[j];
             length = mutations->derived_state_offset[j + 1]
                      - mutations->derived_state_offset[j];
@@ -1027,7 +1015,8 @@ mutgen_initialise_sites(mutgen_t *self, bool check_kept_times)
             metadata_length
                 = mutations->metadata_offset[j + 1] - mutations->metadata_offset[j];
             ret = mutgen_add_existing_mutation(self, site, (int) j, mutations->node[j],
-                time, state, length, metadata, metadata_length);
+                nodes->time[mutations->node[j]], state, length, metadata,
+                metadata_length);
             if (ret != 0) {
                 goto out;
             }
@@ -1064,8 +1053,9 @@ mutgen_populate_tables(mutgen_t *self)
                     assert(parent_id != TSK_NULL);
                 }
                 mutation_id = tsk_mutation_table_add_row(mutations, site_id, m->node,
-                    parent_id, m->time, m->derived_state, m->derived_state_length,
-                    m->metadata, m->metadata_length);
+                    parent_id, TSK_UNKNOWN_TIME, /* FIXME */
+                    m->derived_state, m->derived_state_length, m->metadata,
+                    m->metadata_length);
                 if (mutation_id < 0) {
                     ret = msp_set_tsk_error(mutation_id);
                     goto out;
@@ -1211,7 +1201,10 @@ mutgen_choose_alleles(mutgen_t *self, tsk_id_t *parent, mutation_t **bottom_muta
         } else {
             parent_mut = bottom_mutation[u];
             mut->parent = parent_mut;
-            assert(mut->time <= parent_mut->time);
+            if (mut->time > parent_mut->time || (parent_mut->new && !mut->new)) {
+                ret = MSP_ERR_MUTATION_GENERATION_OUT_OF_ORDER;
+                goto out;
+            }
             if (mut->new) {
                 pa = parent_mut->derived_state;
                 palen = parent_mut->derived_state_length;
@@ -1329,7 +1322,6 @@ mutgen_generate(mutgen_t *self, int flags)
 {
     int ret = 0;
     bool discrete_sites = flags & MSP_DISCRETE_SITES;
-    bool kept_mutations_before_end_time = flags & MSP_KEPT_MUTATIONS_BEFORE_END_TIME;
 
     avl_clear_tree(&self->sites);
 
@@ -1343,8 +1335,7 @@ mutgen_generate(mutgen_t *self, int flags)
         goto out;
     }
     if (flags & MSP_KEEP_SITES) {
-        ret = mutgen_initialise_sites(
-            self, discrete_sites && !kept_mutations_before_end_time);
+        ret = mutgen_initialise_sites(self);
         if (ret != 0) {
             goto out;
         }
